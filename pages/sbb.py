@@ -22,11 +22,9 @@ def reload_df(conn, sheet_name):
     df.set_index("Periode", inplace=True)
     return df.sort_index()
 
-
 @st.cache_resource
 def load_model():
     return joblib.load("models/model_sarimax_sbb_update_final.pkl")
-
 
 def generate_insight_with_gpt(df_full_forecast):
     data_summary = df_full_forecast[["Forecasting"]].tail(12).to_string()
@@ -57,14 +55,16 @@ def show():
 
     conn = st.connection("gsheets", type=GSheetsConnection)
 
-    if "df_sbb" not in st.session_state:
-        st.session_state.df_sbb = reload_df(conn, "SBB")
-    
-    if "df_forecasting_assumptions" not in st.session_state:
-        st.session_state.df_forecasting_assumptions = reload_df(conn, "Forecasting SBB")
+    PAGE_KEY = "sbb"
 
-    df = st.session_state.df_sbb
-    forecasting_assumptions = st.session_state.df_forecasting_assumptions
+    if f"df_{PAGE_KEY}" not in st.session_state:
+        st.session_state[f"df_{PAGE_KEY}"] = reload_df(conn, "SBB")
+    
+    if f"df_forecasting_assumptions_{PAGE_KEY}" not in st.session_state:
+        st.session_state[f"df_forecasting_assumptions_{PAGE_KEY}"] = reload_df(conn, "Forecasting SBB")
+    
+    df = st.session_state[f"df_{PAGE_KEY}"]
+    forecasting_assumptions = st.session_state[f"df_forecasting_assumptions_{PAGE_KEY}"]
 
     with st.sidebar:
         st.markdown("🗓️ **Filter Hasil Prediksi**")
@@ -84,9 +84,8 @@ def show():
             value=(forecasting_assumptions.index.min().to_pydatetime(), forecasting_assumptions.index.max().to_pydatetime()),
             format="MM/YYYY"
         )
-
     try:
-        best_features = ['Inflasi', 'APBN Infra', 'Effective Working Days']
+        best_features = ['APBN Infra', 'PDB_Konstruksi',]
         model_fit = load_model()
         exog_df = forecasting_assumptions[best_features]
         
@@ -94,8 +93,9 @@ def show():
         forecasting_final = pd.DataFrame({
             "Forecasting": forecast_12_months
         }, index=pd.date_range(start=forecasting_assumptions.index.min(), periods=12, freq='MS'))
-        st.session_state.df_forecasting_assumptions['Forecasting'] = forecasting_final
-        conn.update(worksheet="Forecasting SBB", data=st.session_state.df_forecasting_assumptions.reset_index())
+        
+        st.session_state[f"df_forecasting_assumptions_{PAGE_KEY}"]['Forecasting'] = forecasting_final
+        conn.update(worksheet="Forecasting SBB", data=st.session_state[f"df_forecasting_assumptions_{PAGE_KEY}"].reset_index())
 
         df_filtered = df[(df.index >= bulan_awal) & (df.index <= bulan_akhir)]
         forecasting_existing = df_filtered[(df_filtered.index >= bulan_awal) & (df_filtered.index <= bulan_akhir)]['Forecasting']

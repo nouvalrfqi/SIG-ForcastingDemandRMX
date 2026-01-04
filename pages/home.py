@@ -26,3 +26,7 @@ with col2:
     if st.button("📊 Buka Dashboard VUB", type="primary"):
         st.switch_page("pages/vub.py")
 
+
+
+
+

@@ -1,8 +1,8 @@
 streamlit
 st-gsheets-connection
 pandas
-numpy==1.24.4
-pmdarima==2.0.4
+numpy==2.0.2
+pmdarima==2.1.1
 plotly
 joblib
 openai

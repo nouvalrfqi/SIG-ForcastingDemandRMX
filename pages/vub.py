@@ -86,7 +86,7 @@ def show():
         )
 
     try:
-        best_features = ['BI Rate', 'APBN Infra', 'PDB Konstruksi']
+        best_features = ['Inflasi', 'APBN Infra']
         model_fit = load_model()
         exog_df = forecasting_assumptions[best_features]
         

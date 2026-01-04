@@ -12,7 +12,8 @@ pages = st.navigation({
     ],
     "Tipe": [
         st.Page("pages/sbb.py", title="SBB", icon="📊"),
-        st.Page("pages/vub.py", title="VUB", icon="📊")
+        st.Page("pages/vub.py", title="VUB", icon="📊"),
+        st.Page("pages/demand.py", title="Demand", icon="📊")
     ],
     "Pengaturan": [
         st.Page("pages/pengaturan_data_sbb.py", title="Data SBB", icon="📄"),
