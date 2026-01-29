@@ -2,6 +2,7 @@ import streamlit as st
 from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import requests
+import urllib3
 import pmdarima as pm
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 import itertools
@@ -12,6 +13,9 @@ import json, re
 import holidays
 from datetime import date, timedelta
 import time
+
+# Suppress SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -49,7 +53,7 @@ def update_dataframe(df, updates_dict):
 def scrape_inflasi():
     API_KEY = st.secrets['scraping']['api_key']
     url = f"https://webapi.bps.go.id/v1/api/view/domain/0000/model/statictable/lang/ind/id/915/key/{API_KEY}"
-    response = requests.get(url)
+    response = requests.get(url, verify=False)
     json_data = response.json()
     html_encoded = json_data["data"]["table"]
     html_decoded = html.unescape(html_encoded)
@@ -103,7 +107,7 @@ def scrape_bi_rate():
     API_KEY = st.secrets['scraping']['api_key']
     url = f'https://webapi.bps.go.id/v1/api/list/model/data/lang/ind/domain/0000/var/379/key/{API_KEY}?th=2020-2025'
 
-    response = requests.get(url)
+    response = requests.get(url, verify=False)
     data = response.json()
     datacontent = data.get('datacontent', {})
 
