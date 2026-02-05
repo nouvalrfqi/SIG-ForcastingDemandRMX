@@ -16,16 +16,33 @@ load_dotenv()
 api_key = st.secrets['openai']['api_key']
 client = OpenAI(base_url="https://models.github.ai/inference", api_key=api_key)
 
-def reload_df(conn, sheet_name):
+@st.cache_resource
+def load_model(model_path: str):
+    return joblib.load(model_path)
+
+@st.cache_data(ttl=600)
+def load_gsheet(sheet_name: str):
+    conn = st.connection("gsheets", type=GSheetsConnection)
     df = conn.read(worksheet=sheet_name)
+    return df
+
+@st.cache_data
+def preprocess_data(df: pd.DataFrame, page_type: str):
+    df = df.copy()
     df["Periode"] = pd.to_datetime(df["Periode"]).dt.normalize()
     df.set_index("Periode", inplace=True)
     return df.sort_index()
 
-
-@st.cache_resource
-def load_model():
-    return joblib.load("models/model_sarimax_vub_update_final.pkl")
+def resolve_model_path(relative_path: str) -> str:
+    from pathlib import Path
+    base_path = Path(__file__).resolve().parent.parent
+    candidate = base_path / relative_path
+    if candidate.exists():
+        return str(candidate)
+    candidate2 = Path(relative_path)
+    if candidate2.exists():
+        return str(candidate2)
+    raise FileNotFoundError(f"Model file not found at {candidate2}")
 
 
 def generate_insight_with_gpt(df_full_forecast):
@@ -58,10 +75,10 @@ def show():
     conn = st.connection("gsheets", type=GSheetsConnection)
 
     if "df_vub" not in st.session_state:
-        st.session_state.df_vub = reload_df(conn, "VUB")
+        st.session_state.df_vub = preprocess_data(load_gsheet("VUB"), "VUB")
     
     if "df_forecasting_assumptions" not in st.session_state:
-        st.session_state.df_forecasting_assumptions = reload_df(conn, "Forecasting VUB")
+        st.session_state.df_forecasting_assumptions = preprocess_data(load_gsheet("Forecasting VUB"), "Forecasting VUB")
 
     df = st.session_state.df_vub
     forecasting_assumptions = st.session_state.df_forecasting_assumptions
@@ -87,7 +104,8 @@ def show():
 
     try:
         best_features = ['Inflasi', 'APBN Infra']
-        model_fit = load_model()
+        model_path = resolve_model_path("models/model_sarimax_vub_update_final.pkl")
+        model_fit = load_model(model_path)
         exog_df = forecasting_assumptions[best_features]
         
         forecast_12_months = model_fit.forecast(steps=12, exog=exog_df[:12])

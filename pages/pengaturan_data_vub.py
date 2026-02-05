@@ -17,8 +17,6 @@ import time
 # Suppress SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-
-
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def reload_df(conn, sheet_name):

@@ -25,26 +25,32 @@ client = None
 if api_key:
     client = OpenAI(base_url="https://models.github.ai/inference", api_key=api_key)
 
-def reload_df(conn, sheet_name):
+@st.cache_resource
+def load_model(model_path: str):
+    return joblib.load(model_path)
+
+@st.cache_data(ttl=600)
+def load_gsheet(sheet_name: str):
+    conn = st.connection("gsheets", type=GSheetsConnection)
     df = conn.read(worksheet=sheet_name)
+    return df
+
+@st.cache_data
+def preprocess_data(df: pd.DataFrame, page_type: str):
+    df = df.copy()
     df["Periode"] = pd.to_datetime(df["Periode"]).dt.normalize()
     df.set_index("Periode", inplace=True)
     return df.sort_index()
 
-@st.cache_resource
-def load_model():
-    # Use absolute path to be safe
+def resolve_model_path(relative_path: str) -> str:
     base_path = Path(__file__).resolve().parent.parent
-    model_path = base_path / "models" / "model_sarimax_Demand.pkl"
-    
-    if not model_path.exists():
-        # Fallback to relative path if strictly running from root
-        model_path = Path("models/model_sarimax_Demand.pkl")
-    
-    if not model_path.exists():
-         raise FileNotFoundError(f"Model file not found at {model_path}")
-         
-    return joblib.load(str(model_path))
+    candidate = base_path / relative_path
+    if candidate.exists():
+        return str(candidate)
+    candidate2 = Path(relative_path)
+    if candidate2.exists():
+        return str(candidate2)
+    raise FileNotFoundError(f"Model file not found at {candidate2}")
 
 def generate_insight_with_gpt(df_full_forecast):
     if not client:
@@ -80,10 +86,10 @@ def show():
     PAGE_KEY = "demand"
 
     if f"df_{PAGE_KEY}" not in st.session_state:
-        st.session_state[f"df_{PAGE_KEY}"] = reload_df(conn, "Demand")
+        st.session_state[f"df_{PAGE_KEY}"] = preprocess_data(load_gsheet("Demand"), "Demand")
     
     if f"df_forecasting_assumptions_{PAGE_KEY}" not in st.session_state:
-        st.session_state[f"df_forecasting_assumptions_{PAGE_KEY}"] = reload_df(conn, "Forecasting Demand")
+        st.session_state[f"df_forecasting_assumptions_{PAGE_KEY}"] = preprocess_data(load_gsheet("Forecasting Demand"), "Forecasting Demand")
 
     df = st.session_state[f"df_{PAGE_KEY}"]
     forecasting_assumptions = st.session_state[f"df_forecasting_assumptions_{PAGE_KEY}"]
@@ -110,7 +116,8 @@ def show():
     forecasting_final = None
     try:
         best_features = ['BI Rate', 'Inflasi', 'APBN Infra', 'Effective Working Days']
-        model_fit = load_model()
+        model_path = resolve_model_path("models/model_sarimax_Demand.pkl")
+        model_fit = load_model(model_path)
         exog_df = forecasting_assumptions[best_features]
         
         forecast_12_months = model_fit.forecast(steps=12, exog=exog_df[:12])

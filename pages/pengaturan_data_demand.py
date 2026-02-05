@@ -17,6 +17,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 conn = st.connection("gsheets", type=GSheetsConnection)
 
+
 def reload_df(conn, sheet_name):
     df = conn.read(worksheet=sheet_name)
     df["Periode"] = pd.to_datetime(df["Periode"])
