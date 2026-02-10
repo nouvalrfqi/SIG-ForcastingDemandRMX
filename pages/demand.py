@@ -135,16 +135,14 @@ def show():
 
         df_filtered = df[(df.index >= bulan_awal) & (df.index <= bulan_akhir)]
         
-        # Handle historical forecasting if available
         if 'Forecasting' in df_filtered.columns:
              forecasting_existing = df_filtered['Forecasting']
              full_forecasting = pd.concat([forecasting_existing, forecasting_final])
-             # Remove duplicates if any index overlaps, keeping the latest (final)
+
              full_forecasting = full_forecasting[~full_forecasting.index.duplicated(keep='last')]
         else:
              full_forecasting = forecasting_final
         
-        # Filter full_forecasting based on slider
         full_forecasting = full_forecasting[(full_forecasting.index >= bulan_awal) & (full_forecasting.index <= bulan_akhir)]
 
         st.subheader("📈 Hasil Peramalan")
