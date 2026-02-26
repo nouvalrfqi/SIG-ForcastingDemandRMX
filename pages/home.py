@@ -1,8 +1,5 @@
 import streamlit as st
 
-# Konfigurasi halaman
-
-
 st.title("📊 Peramalan Volume Penjualan ReadyMix")
 
 st.write(
@@ -31,7 +28,3 @@ with col3:
     st.write("Lihat tren dan peramalan penjualan Demand selama 1 tahun ke depan.")
     if st.button("📊 Buka Dashboard Demand", type="primary"):
         st.switch_page("pages/demand.py")
-
-
-
-
