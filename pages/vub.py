@@ -1,60 +1,47 @@
 import streamlit as st
-from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import pmdarima as pm
-from statsmodels.tsa.statespace.sarimax import SARIMAX
-import itertools
-from tqdm import tqdm
 import joblib
 import os
 from openai import OpenAI
 from dotenv import load_dotenv
+from pathlib import Path
+import database
+
 load_dotenv()
 
-api_key = st.secrets['openai']['api_key']
-client = OpenAI(base_url="https://models.github.ai/inference", api_key=api_key)
+try:
+    api_key = st.secrets['openai']['api_key']
+except Exception:
+    api_key = os.getenv("OPENAI_API_KEY")
+
+client = None
+if api_key:
+    client = OpenAI(base_url="https://models.github.ai/inference", api_key=api_key)
+
 
 @st.cache_resource
 def load_model(model_path: str):
     return joblib.load(model_path)
 
-@st.cache_data(ttl=600)
-def load_gsheet(sheet_name: str):
-    conn = st.connection("gsheets", type=GSheetsConnection)
-    df = conn.read(worksheet=sheet_name)
-    return df
-
-@st.cache_data
-def preprocess_data(df: pd.DataFrame, page_type: str):
-    df = df.copy()
-    df["Periode"] = pd.to_datetime(df["Periode"]).dt.normalize()
-    df.set_index("Periode", inplace=True)
-    return df.sort_index()
 
 def resolve_model_path(relative_path: str) -> str:
-    from pathlib import Path
     base_path = Path(__file__).resolve().parent.parent
-    candidate = base_path / relative_path
-    if candidate.exists():
-        return str(candidate)
-    candidate2 = Path(relative_path)
-    if candidate2.exists():
-        return str(candidate2)
-    raise FileNotFoundError(f"Model file not found at {candidate2}")
+    return str(base_path / relative_path)
 
 
-def generate_insight_with_gpt(df_full_forecast):
-    data_summary = df_full_forecast[["Forecasting"]].tail(12).to_string()
+def generate_insight_with_gpt(df_forecast):
+    if not client:
+        return "⚠️ OpenAI API Key tidak ditemukan."
+    data_summary = df_forecast[["Forecasting"]].tail(12).to_string()
     prompt = f"""
-    PT Varia Usaha Beton (PT VUB) adalah anak perusahaan dari PT Semen Indonesia Beton yang bergerak di bidang produksi dan distribusi beton siap pakai (ready-mix), beton pracetak, dan material konstruksi lainnya. Berdiri sejak tahun 1991, PT VUB melayani berbagai kebutuhan konstruksi mulai dari infrastruktur besar hingga pembangunan komersial dan perumahan. Dengan lebih dari 30 plant yang tersebar di Jawa, Sulawesi, Kalimantan, dan Nusa Tenggara Barat, PT VUB memiliki jaringan distribusi yang luas serta didukung kuari internal untuk menjamin pasokan bahan baku. Perusahaan ini juga menyediakan layanan pengecoran, penyewaan concrete pump, dan produk beton inovatif seperti paving block dan pracetak. Mengusung prinsip profesionalisme, efisiensi, dan kepatuhan terhadap standar mutu internasional (ISO 9001, ISO 14001, OHSAS 18001), PT VUB menjadi salah satu penyedia solusi beton yang handal dan kompetitif di pasar nasional.
-    
+    PT Volun Bangun Utama (VUB) adalah anak perusahaan dari PT SIG yang bergerak di bidang produksi beton siap pakai.
+
     Berikut adalah hasil peramalan volume penjualan readymix unit VUB selama 12 bulan ke depan:
-    
     {data_summary}
 
-    Berdasarkan data tersebut dan latar belakang perusahaan di atas, lakukan analisis terhadap tren penjualan, temukan insight yang relevan, serta berikan rekomendasi bisnis strategis. Sampaikan dalam bahasa Indonesia yang formal, ringkas, dan berbasis data.
+    Lakukan analisis tren penjualan, temukan insight relevan, dan berikan rekomendasi bisnis strategis dalam bahasa Indonesia yang formal dan ringkas.
     """
     try:
         response = client.chat.completions.create(
@@ -70,103 +57,141 @@ def generate_insight_with_gpt(df_full_forecast):
 
 
 def show():
-    st.title("📊 Peramalan Volume Penjualan ReadyMix VUB")
+    st.title("📊 Peramalan Volume Penjualan ReadyMix — VUB")
 
-    conn = st.connection("gsheets", type=GSheetsConnection)
+    # ── Load Data ────────────────────────────────────────────────────
+    df = database.get_data("vub_actual")
+    exog_2026 = database.get_data("forecast_exog_2026")
 
-    if "df_vub" not in st.session_state:
-        st.session_state.df_vub = preprocess_data(load_gsheet("VUB"), "VUB")
-    
-    if "df_forecasting_assumptions" not in st.session_state:
-        st.session_state.df_forecasting_assumptions = preprocess_data(load_gsheet("Forecasting VUB"), "Forecasting VUB")
+    if df.empty:
+        st.warning("⚠️ Data aktual belum tersedia. Buka Pengaturan Data.")
+        return
+    if exog_2026.empty:
+        st.warning("⚠️ Data variabel eksogen 2026 belum tersedia.")
+        return
 
-    df = st.session_state.df_vub
-    forecasting_assumptions = st.session_state.df_forecasting_assumptions
+    # ── Generate Forecast ────────────────────────────────────────────
+    forecasting_final = None
+    try:
+        model_path = resolve_model_path("models/vub.pkl")
+        model_fit = load_model(model_path)
+
+        # ── Hybrid Exogenous Logic ───────────────────────────────────
+        # Gunakan data aktual 2026 jika tersedia, sisanya gunakan asumsi forecast_exog_2026
+        best_features = ['Inflasi', 'BI Rate', 'Effective Working Days']
+        
+        # Mulai dengan data asumsi
+        exog_input_2026 = exog_2026.copy()
+        
+        # Ambil data aktual yang masuk tahun 2026
+        actual_2026 = df[df.index.year == 2026]
+        
+        for p in exog_input_2026.index:
+            if p in actual_2026.index:
+                # Cek Inflasi
+                if pd.notna(actual_2026.loc[p, 'Inflasi']) and actual_2026.loc[p, 'Inflasi'] != 0:
+                    exog_input_2026.loc[p, 'Inflasi'] = actual_2026.loc[p, 'Inflasi']
+                
+                # Cek BI Rate
+                if pd.notna(actual_2026.loc[p, 'BI Rate']) and actual_2026.loc[p, 'BI Rate'] != 0:
+                    exog_input_2026.loc[p, 'BI Rate'] = actual_2026.loc[p, 'BI Rate']
+                
+                # Cek EWD
+                if pd.notna(actual_2026.loc[p, 'Effective Working Days']) and actual_2026.loc[p, 'Effective Working Days'] != 0:
+                    exog_input_2026.loc[p, 'Effective Working Days'] = actual_2026.loc[p, 'Effective Working Days']
+
+        exog_df = exog_input_2026[best_features].astype(float)
+
+        forecast_values = model_fit.predict(n_periods=12, X=exog_df[:12])
+        forecast_index = pd.date_range(start='2026-01-01', periods=12, freq='MS')
+
+        forecasting_final = pd.DataFrame({
+            "Forecasting": forecast_values.astype(float)
+        }, index=forecast_index)
+        forecasting_final.index.name = "Periode"
+
+        # Save to separate forecast table
+        database.save_data("vub_forecast_results", forecasting_final)
+
+
+    except Exception as e:
+        st.error(f"❌ Gagal memuat model atau menghitung prediksi: {e}")
+        return
+
+    # ── Sidebar Filter ───────────────────────────────────────────────
+    df_forecast_results = database.get_data("vub_forecast_results")
 
     with st.sidebar:
-        st.markdown("🗓️ **Filter Hasil Prediksi**")
-        combined_index = pd.date_range(
-            start=df.index.min(),
-            end=forecasting_assumptions.index.max(),
-            freq='MS'
-        )
-        periode_full = combined_index
-        bulan_min = periode_full.min()
-        bulan_max = periode_full.max()
+        st.markdown("🗓️ **Filter Rentang Periode**")
+        all_dates = df.index
+        if not df_forecast_results.empty:
+            df_forecast_results.index = pd.to_datetime(df_forecast_results.index)
+            all_dates = all_dates.union(df_forecast_results.index)
+
+        if all_dates.empty or not isinstance(all_dates.min(), pd.Timestamp):
+            bulan_awal_val = pd.Timestamp('2024-01-01').to_pydatetime()
+            bulan_akhir_val = pd.Timestamp('2026-12-01').to_pydatetime()
+        else:
+            bulan_awal_val = pd.Timestamp('2024-01-01').to_pydatetime()
+            bulan_akhir_val = all_dates.max().to_pydatetime()
 
         bulan_awal, bulan_akhir = st.slider(
             "Pilih rentang bulan:",
-            min_value=bulan_min,
-            max_value=bulan_max,
-            value=(forecasting_assumptions.index.min().to_pydatetime(), forecasting_assumptions.index.max().to_pydatetime()),
+            min_value=all_dates.min().to_pydatetime() if not all_dates.empty else pd.Timestamp('2020-01-01').to_pydatetime(),
+            max_value=all_dates.max().to_pydatetime() if not all_dates.empty else pd.Timestamp('2026-12-01').to_pydatetime(),
+            value=(bulan_awal_val, bulan_akhir_val),
             format="MM/YYYY"
         )
 
-    try:
-        best_features = ['Inflasi', 'APBN Infra']
-        model_path = resolve_model_path("models/model_sarimax_vub_update_final.pkl")
-        model_fit = load_model(model_path)
-        exog_df = forecasting_assumptions[best_features]
-        
-        forecast_12_months = model_fit.forecast(steps=12, exog=exog_df[:12])
-        forecasting_final = pd.DataFrame({
-            "Forecasting": forecast_12_months
-        }, index=pd.date_range(start=forecasting_assumptions.index.min(), periods=12, freq='MS'))
-        st.session_state.df_forecasting_assumptions['Forecasting'] = forecasting_final
-        conn.update(worksheet="Forecasting VUB", data=st.session_state.df_forecasting_assumptions.reset_index())
+    # ── Filter data ──────────────────────────────────────────────────
+    mask = (df.index >= bulan_awal) & (df.index <= bulan_akhir)
+    df_filtered = df[mask]
 
-        df_filtered = df[(df.index >= bulan_awal) & (df.index <= bulan_akhir)]
-        forecasting_existing = df_filtered[(df_filtered.index >= bulan_awal) & (df_filtered.index <= bulan_akhir)]['Forecasting']
-        
-        full_forecasting = pd.concat([
-            forecasting_existing,
-            forecasting_final
-        ])
+    has_actual = df_filtered['Volume'].notna() & (df_filtered['Volume'] > 0)
+    df_actual = df_filtered[has_actual]
 
-        st.subheader("📈 Hasil Peramalan")
+    # Forecast data (from separate table)
+    if not df_forecast_results.empty:
+        df_forecast_display = df_forecast_results[
+            (df_forecast_results.index >= bulan_awal) & (df_forecast_results.index <= bulan_akhir)
+        ]
+    else:
+        df_forecast_display = pd.DataFrame()
 
-        fig = go.Figure()
+    # ── Chart ────────────────────────────────────────────────────────
+    st.subheader("📈 Hasil Peramalan vs Data Aktual")
+
+    fig = go.Figure()
+    if not df_forecast_display.empty:
         fig.add_trace(go.Scatter(
-            x=full_forecasting.index,
-            y=full_forecasting["Forecasting"],
-            mode="lines+markers+text",
-            name="Volume Prediksi",
-            textposition="top center",
-            line=dict(color="royalblue", width=3),
-            marker=dict(size=7, symbol="circle"),
-            hovertemplate="Volume Prediksi: %{y:.2f}<extra></extra>"
+            x=df_forecast_display.index, y=df_forecast_display["Forecasting"],
+            mode="lines+markers", name="Volume Prediksi",
+            line=dict(color="royalblue", width=3), marker=dict(size=7),
+            hovertemplate="Prediksi: %{y:,.0f}<extra></extra>"
+        ))
+    if not df_actual.empty:
+        fig.add_trace(go.Scatter(
+            x=df_actual.index, y=df_actual["Volume"],
+            mode="lines+markers", name="Volume Aktual",
+            line=dict(color="firebrick", width=3), marker=dict(size=7),
+            hovertemplate="Aktual: %{y:,.0f}<extra></extra>"
         ))
 
-        fig.add_trace(go.Scatter(
-            x=df_filtered.index,
-            y=df_filtered["Volume"],
-            mode="lines+markers+text",
-            name="Volume Aktual",
-            line=dict(color="firebrick", width=3),
-            marker=dict(size=7, symbol="circle"),
-            hovertemplate="Volume Aktual: %{y:.2f}<extra></extra>"
-        ))
+    fig.update_layout(
+        xaxis_title="Periode", yaxis_title="Volume (m³)",
+        template="plotly_white", hovermode="x unified",
+        height=500, autosize=True,
+        legend=dict(title="Keterangan", orientation="h",
+                    yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
-        fig.update_layout(
-            xaxis_title="Periode",
-            yaxis_title="Volume",
-            template="plotly_white",
-            hovermode="x unified",
-            margin=dict(t=40, b=40, l=20, r=20),
-            height=500,
-            autosize=True,
-            legend=dict(title="Keterangan", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    except Exception as e:
-        st.error(f"❌ Gagal memuat model SARIMAX atau menghitung prediksi: {e}")
-
-    st.subheader("🧠 Rekomendasi Strategis")
-    with st.spinner("Menghasilkan analisis dengan AI..."):
-        insight = generate_insight_with_gpt(forecasting_final)
-        st.markdown(insight)
+    # ── GPT Insight ──────────────────────────────────────────────────
+    if forecasting_final is not None:
+        st.subheader("🧠 Rekomendasi Strategis")
+        with st.spinner("Menghasilkan analisis dengan AI..."):
+            insight = generate_insight_with_gpt(forecasting_final)
+            st.markdown(insight)
 
 
 if __name__ == "__main__" or st.runtime.exists():

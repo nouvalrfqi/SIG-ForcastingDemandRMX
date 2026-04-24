@@ -1,59 +1,47 @@
 import streamlit as st
-from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import pmdarima as pm
-from statsmodels.tsa.statespace.sarimax import SARIMAX
-import itertools
-from tqdm import tqdm
 import joblib
 import os
 from openai import OpenAI
 from dotenv import load_dotenv
+from pathlib import Path
+import database
+
 load_dotenv()
 
-api_key = st.secrets['openai']['api_key']
-client = OpenAI(base_url="https://models.github.ai/inference", api_key=api_key)
+try:
+    api_key = st.secrets['openai']['api_key']
+except Exception:
+    api_key = os.getenv("OPENAI_API_KEY")
+
+client = None
+if api_key:
+    client = OpenAI(base_url="https://models.github.ai/inference", api_key=api_key)
+
 
 @st.cache_resource
 def load_model(model_path: str):
     return joblib.load(model_path)
 
-@st.cache_data(ttl=600)
-def load_gsheet(sheet_name: str):
-    conn = st.connection("gsheets", type=GSheetsConnection)
-    df = conn.read(worksheet=sheet_name)
-    return df
-
-@st.cache_data
-def preprocess_data(df: pd.DataFrame, page_type: str):
-    df = df.copy()
-    df["Periode"] = pd.to_datetime(df["Periode"]).dt.normalize()
-    df.set_index("Periode", inplace=True)
-    return df.sort_index()
 
 def resolve_model_path(relative_path: str) -> str:
-    from pathlib import Path
     base_path = Path(__file__).resolve().parent.parent
-    candidate = base_path / relative_path
-    if candidate.exists():
-        return str(candidate)
-    candidate2 = Path(relative_path)
-    if candidate2.exists():
-        return str(candidate2)
-    raise FileNotFoundError(f"Model file not found at {candidate2}")
+    return str(base_path / relative_path)
 
-def generate_insight_with_gpt(df_full_forecast):
-    data_summary = df_full_forecast[["Forecasting"]].tail(12).to_string()
+
+def generate_insight_with_gpt(df_forecast):
+    if not client:
+        return "⚠️ OpenAI API Key tidak ditemukan."
+    data_summary = df_forecast[["Forecasting"]].tail(12).to_string()
     prompt = f"""
-    PT Solusi Bangun Beton (PT SBB) adalah anak perusahaan dari PT Solusi Bangun Indonesia Tbk (SBI) yang bergerak di bidang produksi dan distribusi beton siap pakai (ready-mix concrete). Perusahaan ini menyediakan solusi beton berkualitas tinggi untuk berbagai kebutuhan konstruksi, mulai dari proyek infrastruktur skala besar hingga pembangunan perumahan dan komersial. Dengan jaringan lebih dari 30 batching plant yang tersebar di Pulau Jawa dan armada pengangkut yang terus diperluas, PT SBB mendukung pengiriman beton secara cepat dan efisien. Selain produk konvensional, PT SBB juga menawarkan beton inovatif seperti ThruCrete (beton berpori untuk resapan air), DekoCrete (beton dekoratif untuk estetika kawasan), dan SpeedCrete (beton cepat kering). Mengusung prinsip keberlanjutan, PT SBB menggunakan semen ramah lingkungan dan mendukung pengurangan emisi karbon dalam konstruksi. Dengan inovasi digital seperti layanan DynaPay dan komitmen terhadap mutu melalui laboratorium bersertifikasi, PT SBB berperan penting dalam pembangunan infrastruktur yang modern, efisien, dan berkelanjutan di Indonesia.
-    
-    Berikut adalah hasil peramalan volume penjualan readymix unit SBB selama 12 bulan ke depan:
+    PT Solusi Bangun Beton (SBB) adalah anak perusahaan dari PT SBI yang bergerak di bidang produksi dan distribusi beton siap pakai.
 
+    Berikut adalah hasil peramalan volume penjualan readymix unit SBB selama 12 bulan ke depan:
     {data_summary}
 
-    Berdasarkan data tersebut dan latar belakang perusahaan di atas, lakukan analisis terhadap tren penjualan, temukan insight yang relevan, serta berikan rekomendasi bisnis strategis. Sampaikan dalam bahasa Indonesia yang formal, ringkas, dan berbasis data.
+    Lakukan analisis tren penjualan, temukan insight relevan, dan berikan rekomendasi bisnis strategis dalam bahasa Indonesia yang formal dan ringkas.
     """
     try:
         response = client.chat.completions.create(
@@ -69,105 +57,111 @@ def generate_insight_with_gpt(df_full_forecast):
 
 
 def show():
-    st.title("📊 Peramalan Volume Penjualan ReadyMix SBB")
+    st.title("📊 Peramalan Volume Penjualan ReadyMix — SBB")
 
-    conn = st.connection("gsheets", type=GSheetsConnection)
+    # ── Load Data ────────────────────────────────────────────────────
+    df = database.get_data("sbb_actual")
 
-    PAGE_KEY = "sbb"
+    if df.empty:
+        st.warning("⚠️ Data aktual belum tersedia. Buka Pengaturan Data.")
+        return
 
-    if f"df_{PAGE_KEY}" not in st.session_state:
-        st.session_state[f"df_{PAGE_KEY}"] = preprocess_data(load_gsheet("SBB"), "SBB")
-    
-    if f"df_forecasting_assumptions_{PAGE_KEY}" not in st.session_state:
-        st.session_state[f"df_forecasting_assumptions_{PAGE_KEY}"] = preprocess_data(load_gsheet("Forecasting SBB"), "Forecasting SBB")
-    
-    df = st.session_state[f"df_{PAGE_KEY}"]
-    forecasting_assumptions = st.session_state[f"df_forecasting_assumptions_{PAGE_KEY}"]
+    # ── Generate Forecast (SBB = SARIMA, no exog) ────────────────────
+    forecasting_final = None
+    try:
+        model_path = resolve_model_path("models/sbb.pkl")
+        model_fit = load_model(model_path)
+
+        forecast_values = model_fit.predict(n_periods=12)
+        forecast_index = pd.date_range(start='2026-01-01', periods=12, freq='MS')
+
+        forecasting_final = pd.DataFrame({
+            "Forecasting": forecast_values.astype(float)
+        }, index=forecast_index)
+        forecasting_final.index.name = "Periode"
+
+        # Save to separate forecast table
+        database.save_data("sbb_forecast_results", forecasting_final)
+
+
+    except Exception as e:
+        st.error(f"❌ Gagal memuat model atau menghitung prediksi: {e}")
+        return
+
+    # ── Sidebar Filter ───────────────────────────────────────────────
+    df_forecast_results = database.get_data("sbb_forecast_results")
 
     with st.sidebar:
-        st.markdown("🗓️ **Filter Hasil Prediksi**")
-        combined_index = pd.date_range(
-            start=df.index.min(),
-            end=forecasting_assumptions.index.max(),
-            freq='MS'
-        )
-        periode_full = combined_index
-        bulan_min = periode_full.min()
-        bulan_max = periode_full.max()
+        st.markdown("🗓️ **Filter Rentang Periode**")
+        all_dates = df.index
+        if not df_forecast_results.empty:
+            df_forecast_results.index = pd.to_datetime(df_forecast_results.index)
+            all_dates = all_dates.union(df_forecast_results.index)
+
+        if all_dates.empty or not isinstance(all_dates.min(), pd.Timestamp):
+            bulan_awal_val = pd.Timestamp('2024-01-01').to_pydatetime()
+            bulan_akhir_val = pd.Timestamp('2026-12-01').to_pydatetime()
+        else:
+            bulan_awal_val = pd.Timestamp('2024-01-01').to_pydatetime()
+            bulan_akhir_val = all_dates.max().to_pydatetime()
 
         bulan_awal, bulan_akhir = st.slider(
             "Pilih rentang bulan:",
-            min_value=bulan_min,
-            max_value=bulan_max,
-            value=(forecasting_assumptions.index.min().to_pydatetime(), forecasting_assumptions.index.max().to_pydatetime()),
+            min_value=all_dates.min().to_pydatetime() if not all_dates.empty else pd.Timestamp('2020-01-01').to_pydatetime(),
+            max_value=all_dates.max().to_pydatetime() if not all_dates.empty else pd.Timestamp('2026-12-01').to_pydatetime(),
+            value=(bulan_awal_val, bulan_akhir_val),
             format="MM/YYYY"
         )
-    try:
-        best_features = ['APBN Infra', 'PDB_Konstruksi',]
-        model_path = resolve_model_path("models/model_sarimax_sbb_update_final.pkl")
-        model_fit = load_model(model_path)
-        exog_df = forecasting_assumptions[best_features]
-        
-        forecast_12_months = model_fit.forecast(steps=12, exog=exog_df[:12])
-        forecasting_final = pd.DataFrame({
-            "Forecasting": forecast_12_months
-        }, index=pd.date_range(start=forecasting_assumptions.index.min(), periods=12, freq='MS'))
-        
-        st.session_state[f"df_forecasting_assumptions_{PAGE_KEY}"]['Forecasting'] = forecasting_final
-        conn.update(worksheet="Forecasting SBB", data=st.session_state[f"df_forecasting_assumptions_{PAGE_KEY}"].reset_index())
 
-        df_filtered = df[(df.index >= bulan_awal) & (df.index <= bulan_akhir)]
-        forecasting_existing = df_filtered[(df_filtered.index >= bulan_awal) & (df_filtered.index <= bulan_akhir)]['Forecasting']
-        
-        full_forecasting = pd.concat([
-            forecasting_existing,
-            forecasting_final
-        ])
+    # ── Filter data ──────────────────────────────────────────────────
+    mask = (df.index >= bulan_awal) & (df.index <= bulan_akhir)
+    df_filtered = df[mask]
 
-        st.subheader("📈 Hasil Peramalan")
+    has_actual = df_filtered['Volume'].notna() & (df_filtered['Volume'] > 0)
+    df_actual = df_filtered[has_actual]
 
-        fig = go.Figure()
+    # Forecast data (from separate table)
+    if not df_forecast_results.empty:
+        df_forecast_display = df_forecast_results[
+            (df_forecast_results.index >= bulan_awal) & (df_forecast_results.index <= bulan_akhir)
+        ]
+    else:
+        df_forecast_display = pd.DataFrame()
+
+    # ── Chart ────────────────────────────────────────────────────────
+    st.subheader("📈 Hasil Peramalan vs Data Aktual")
+
+    fig = go.Figure()
+    if not df_forecast_display.empty:
         fig.add_trace(go.Scatter(
-            x=full_forecasting.index,
-            y=full_forecasting["Forecasting"],
-            mode="lines+markers+text",
-            name="Volume Prediksi",
-            textposition="top center",
-            line=dict(color="royalblue", width=3),
-            marker=dict(size=7, symbol="circle"),
-            hovertemplate="Volume Prediksi: %{y:.2f}<extra></extra>"
+            x=df_forecast_display.index, y=df_forecast_display["Forecasting"],
+            mode="lines+markers", name="Volume Prediksi",
+            line=dict(color="royalblue", width=3), marker=dict(size=7),
+            hovertemplate="Prediksi: %{y:,.0f}<extra></extra>"
+        ))
+    if not df_actual.empty:
+        fig.add_trace(go.Scatter(
+            x=df_actual.index, y=df_actual["Volume"],
+            mode="lines+markers", name="Volume Aktual",
+            line=dict(color="firebrick", width=3), marker=dict(size=7),
+            hovertemplate="Aktual: %{y:,.0f}<extra></extra>"
         ))
 
-        fig.add_trace(go.Scatter(
-            x=df_filtered.index,
-            y=df_filtered["Volume"],
-            mode="lines+markers+text",
-            name="Volume Aktual",
-            line=dict(color="firebrick", width=3),
-            marker=dict(size=7, symbol="circle"),
-            hovertemplate="Volume Aktual: %{y:.2f}<extra></extra>"
-        ))
+    fig.update_layout(
+        xaxis_title="Periode", yaxis_title="Volume (m³)",
+        template="plotly_white", hovermode="x unified",
+        height=500, autosize=True,
+        legend=dict(title="Keterangan", orientation="h",
+                    yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
-        fig.update_layout(
-            xaxis_title="Periode",
-            yaxis_title="Volume",
-            template="plotly_white",
-            hovermode="x unified",
-            margin=dict(t=40, b=40, l=20, r=20),
-            height=500,
-            autosize=True,
-            legend=dict(title="Keterangan", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    except Exception as e:
-        st.error(f"❌ Gagal memuat model SARIMAX atau menghitung prediksi: {e}")
-
-    st.subheader("🧠 Rekomendasi Strategis")
-    with st.spinner("Menghasilkan analisis dengan AI..."):
-        insight = generate_insight_with_gpt(forecasting_final)
-        st.markdown(insight)
+    # ── GPT Insight ──────────────────────────────────────────────────
+    if forecasting_final is not None:
+        st.subheader("🧠 Rekomendasi Strategis")
+        with st.spinner("Menghasilkan analisis dengan AI..."):
+            insight = generate_insight_with_gpt(forecasting_final)
+            st.markdown(insight)
 
 
 if __name__ == "__main__" or st.runtime.exists():
